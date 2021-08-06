@@ -89,7 +89,7 @@ app.use((request, response) => {
   })
 })
 
-const PORT = process.env || 3001
+const PORT = process.env.PORT || 3001
 //  la iniciación del servidor en express es asincrono
 app.listen(PORT, () => {
   console.log(`servidor corriendo en el puerto ${PORT}`)
