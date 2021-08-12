@@ -1,96 +1,142 @@
+require('dotenv').config()
+require('./mongo')
+
+const Sentry = require('@sentry/node')
+const Tracing = require('@sentry/tracing')
 const express = require('express')
-const cors = require('cors')
 const app = express()
-const logger = require('./loggerMiddleware')
+const cors = require('cors')
+const Note = require('./models/Note')
+const notFound = require('./middleware/notFound.js')
+const handleErrors = require('./middleware/handleErrors.js')
+const usersRouter = require('./controllers/users')
+const User = require('./models/user.js')
 
 app.use(cors())
 app.use(express.json())
+app.use('/images', express.static('images'))
 
-app.use(logger)
+Sentry.init({
+  dsn: 'https://ac034ebd99274911a8234148642e044c@o537348.ingest.sentry.io/5655435',
+  integrations: [
+    // enable HTTP calls tracing
+    new Sentry.Integrations.Http({ tracing: true }),
+    // enable Express.js middleware tracing
+    new Tracing.Integrations.Express({ app })
+  ],
 
-let notes = [
-  {
-    id: 1,
-    content: 'Hola cara de bola',
-    date: '2019-05-30T17:30:31.098Z',
-    important: true
-  },
-  {
-    id: 2,
-    content: 'Browser can execute only Javascript',
-    date: '2019-05-30T18:39:34.091Z',
-    important: false
-  },
-  {
-    id: 3,
-    content: 'GET and POST are the most important methods of HTTP protocol',
-    date: '2019-05-30T19:20:14.298Z',
-    important: true
-  }
-]
-/*  const app = http.createServer((request, response) => {
-  response.writeHead(200, { 'Content-Type': 'application/json' })
-  response.end(JSON.stringify(notes))
+  // We recommend adjusting this value in production, or using tracesSampler
+  // for finer control
+  tracesSampleRate: 1.0
 })
-*/
+
+// RequestHandler creates a separate execution context using domains, so that every
+// transaction/span/breadcrumb is attached to its own Hub instance
+app.use(Sentry.Handlers.requestHandler())
+// TracingHandler creates a trace for every incoming request
+app.use(Sentry.Handlers.tracingHandler())
 
 app.get('/', (request, response) => {
-  response.send('<h1>Holiiiii</h1>')
+  console.log(request.ip)
+  console.log(request.ips)
+  console.log(request.originalUrl)
+  response.send('<h1>Hello World!</h1>')
 })
 
-app.get('/api/notes', (request, response) => {
+app.get('/api/notes', async (request, response) => {
+  const notes = await Note.find({}).populate('user', {
+    username: 1,
+    name: 1
+  })
   response.json(notes)
 })
 
-app.get('/api/notes/:id', (request, response) => {
-  const id = Number(request.params.id)
-  const note = notes.find(note => note.id === id)
-  if (note) {
-    console.log({ note })
-  } else {
-    response.status(404).end()
-  }
+app.get('/api/notes/:id', (request, response, next) => {
+  const { id } = request.params
 
-  response.json(note)
+  Note.findById(id)
+    .then(note => {
+      if (note) return response.json(note)
+      response.status(404).end()
+    })
+    .catch(err => next(err))
 })
 
-app.delete('/api/notes/:id', (request, response) => {
-  const id = Number(request.params.id)
-  notes = notes.filter(note => note.id !== id)
+app.put('/api/notes/:id', (request, response, next) => {
+  const { id } = request.params
+  const note = request.body
+
+  const newNoteInfo = {
+    content: note.content,
+    important: note.important
+  }
+
+  Note.findByIdAndUpdate(id, newNoteInfo, { new: true })
+    .then(result => {
+      response.json(result)
+    })
+    .catch(next)
+})
+
+app.delete('/api/notes/:id', async (request, response, next) => {
+  const { id } = request.params
+  // const note = await Note.findById(id)
+  // if (!note) return response.sendStatus(404)
+
+  const res = await Note.findByIdAndDelete(id)
+  if (res === null) return response.sendStatus(404)
+
   response.status(204).end()
 })
 
-app.post('/api/notes', (request, response) => {
-  const note = request.body
-  if (!note || !note.content) {
-    return response.statusCode(400).jason({
-      error: 'note.content is missing'
+app.post('/api/notes', async (request, response, next) => {
+  const {
+    content,
+    important = false,
+    userId
+  } = request.body
+
+  const user = await User.findById(userId)
+
+  if (!content) {
+    return response.status(400).json({
+      error: 'required "content" field is missing'
     })
   }
 
-  const ids = notes.map(note => note.id)
-  const maxId = Math.max(...ids)
-
-  const newNote = {
-    id: maxId + 1,
-    content: note.content,
-    important: typeof note.important !== 'undefined' ? note.important : false,
-    date: new Date().toISOString()
-
-  }
-  notes = [...notes, newNote]
-  response.status(201).json(newNote)
-})
-
-app.use((request, response) => {
-  console.log(request.path)
-  response.status(404).json({
-    error: 'Not found'
+  const newNote = new Note({
+    content,
+    date: new Date(),
+    important,
+    user: user._id
   })
+
+  // newNote.save().then(savedNote => {
+  //   response.json(savedNote)
+  // }).catch(err => next(err))
+
+  try {
+    const savedNote = await newNote.save()
+
+    user.notes = user.notes.concat(savedNote._id)
+    await user.save()
+
+    response.json(savedNote)
+  } catch (error) {
+    next(error)
+  }
 })
+
+app.use('/api/users', usersRouter)
+
+app.use(notFound)
+
+app.use(Sentry.Handlers.errorHandler())
+app.use(handleErrors)
 
 const PORT = process.env.PORT || 3001
-//  la iniciación del servidor en express es asincrono
-app.listen(PORT, () => {
-  console.log(`servidor corriendo en el puerto ${PORT}`)
+const server = app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`)
 })
+
+module.exports = { app, server }
